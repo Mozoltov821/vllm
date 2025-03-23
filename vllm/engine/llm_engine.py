@@ -121,6 +121,20 @@ class SchedulerContext:
 
 
 class LLMEngine:
+    """
+    功能：
+    1.使用分词器分词
+    2.调度每一步处理哪个请求
+    3.调用模型
+    2.将输出转成文字
+
+    包括：
+    1.tokenizer
+    2.一个大模型实例
+    3.KV cache
+    """
+
+
     """An LLM engine that receives requests and generates texts.
 
     This is the main class for the vLLM engine. It receives requests
@@ -243,6 +257,7 @@ class LLMEngine:
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
 
+        # 设置tokenizer 和 detokenizer
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
@@ -271,11 +286,15 @@ class LLMEngine:
         self.input_processor = input_registry.create_input_processor(
             self.model_config)
 
+        # 创建执行器，执行器是执行模型计算的组件。
+        # LLM Engine --> Executor --> Worker --> Model Runner --> Model
         self.model_executor = executor_class(vllm_config=vllm_config, )
 
+        # 运行方式不是pooling -> 初始化kv cache
         if self.model_config.runner_type != "pooling":
             self._initialize_kv_caches()
 
+        # is_usage_stat开关打开的话，启一个线程记录状态。
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
             from vllm.model_executor.model_loader import (
@@ -313,26 +332,35 @@ class LLMEngine:
                     self.parallel_config.disable_custom_all_reduce,
                 })
 
+        # 设置了tokenizer的话，验活。
         if self.tokenizer:
             # Ping the tokenizer to ensure liveness if it runs in a
             # different process.
             self.tokenizer.ping()
 
+        # 初始化一些空的scheduler输出状态，数量和pp的数量一致
         self.cached_scheduler_outputs = [
             SchedulerOutputState()
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
 
+        # 创建与流水线并行规模等量的SchedulerContext列表，
+        # 每个上下文初始化时携带multi_step_stream_outputs配置参数，用于管理不同流水线阶段的调度策略。
         self.scheduler_contexts = [
             SchedulerContext(multi_step_stream_outputs=self.scheduler_config.
                              multi_step_stream_outputs)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
 
+        # 查是否启用了异步输出处理（use_async_output_proc）。
+        # 如果是，它会为每个虚拟设备ID（v_id）创建异步回调函数；否则，设置空列表。
         if self.model_config.use_async_output_proc:
             process_model_outputs = weak_bind(self._process_model_outputs)
 
             self.async_callbacks = [
+                # `functools.partial`的作用是部分应用一个函数，固定某些参数，生成一个新的可调用对象。
+                # 例如，如果有一个函数`func(a, b)`，使用`partial(func, a=1)`会返回一个新函数，
+                # 调用这个新函数时，`a`参数已经固定为1，只需要提供剩下的参数`b`。
                 partial(process_model_outputs,
                         ctx=self.scheduler_contexts[v_id])
                 for v_id in range(self.parallel_config.pipeline_parallel_size)
@@ -347,6 +375,8 @@ class LLMEngine:
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
+        # 根据配置动态创建调度器实例：1. 判断scheduler_cls是否为字符串类型，若是则通过类名解析获取Scheduler类，否则直接使用配置的类；
+        # 2. 根据流水线并行度循环创建多个调度器实例，存入self.scheduler列表
         if isinstance(self.vllm_config.scheduler_config.scheduler_cls, str):
             Scheduler = resolve_obj_by_qualname(
                 self.vllm_config.scheduler_config.scheduler_cls)
@@ -396,6 +426,8 @@ class LLMEngine:
 
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
+        # 创建输出处理器
+        # beam search: https://www.cnblogs.com/nickchen121/p/15499576.html
         self.output_processor = (
             SequenceGroupOutputProcessor.create_output_processor(
                 self.scheduler_config,
