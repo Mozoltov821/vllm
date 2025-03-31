@@ -257,7 +257,8 @@ class LLMEngine:
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
 
-        # 设置tokenizer 和 detokenizer
+        # 如果不跳过初始化tokenizer，按照配置的参数初始化tokenizer，并且初始化detokenizer
+        # tokenizer_group实际上就是tokenizer
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
@@ -447,6 +448,7 @@ class LLMEngine:
         # the next step without re-scheduling.
         self._skip_scheduling_next_step = False
 
+    #先计算kv block的数量，然后初始化这些kv cache block
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
 
@@ -705,6 +707,24 @@ class LLMEngine:
         "inputs",
         additional_message="Please use the 'prompt' parameter instead.",
     )
+    # 将prompt提交到请求池中，这里并不执行。
+    # 个人理解：提交请求和处理请求被分开了，结偶了。以request pool作为提交和处理的中介。
+    # 这个方法有点意思，用了递归。
+    # 这里是llm_engine.add_request()
+    # llm_engine.add_request() 会调用llm_engine._add_processed_request()
+    #
+    # 当这里的  isinstance(params, SamplingParams) and params.n > 1 时，
+    #   llm_engine._add_processed_request() 会调用ParallelSampleSequenceGroup.add_request(),
+    #   ParallelSampleSequenceGroup.add_request() 内部会循环param.n次，
+    #   每个循环内，会对param做一个deepcopy,将deepcopy后的param.n设置为1，然后再次调用llm_engine._add_processed_request()，这个时候，实际上每次循环都会得到一个seq_group
+    #   ParallelSampleSequenceGroup.add_request()最后将list(seq_group) 再组装成seq_group。
+    # 否则
+    #   llm_engine._add_processed_request() 会创建一个seq，并用这个seq创建一个seq_group，并返回seq_group
+    #
+    # 别人的笔记： https://zhuanlan.zhihu.com/p/645251151
+    # #add_request接口执行多次，接收多个待处理的prompt，将prompt处理成对应token的Sequence。每个输入prompt构造一个SequenceGroup， 其中包含了多个重复的Sequence为后续beam search做准备。SequenceGroup会最终保存到Scheduler中，以进行后续的调度。
+
+
     def add_request(
             self,
             request_id: str,
@@ -790,6 +810,7 @@ class LLMEngine:
                 prompt,
                 tokenizer=self.get_tokenizer(lora_request=lora_request))
 
+        # 貌似就是简单的tokenizer一下
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
             request_id=request_id,
