@@ -722,9 +722,8 @@ class LLMEngine:
     #   llm_engine._add_processed_request() 会创建一个seq，并用这个seq创建一个seq_group，并返回seq_group
     #
     # 别人的笔记： https://zhuanlan.zhihu.com/p/645251151
+    # 勘误： 这里的n 和beam search 并没有关系
     # #add_request接口执行多次，接收多个待处理的prompt，将prompt处理成对应token的Sequence。每个输入prompt构造一个SequenceGroup， 其中包含了多个重复的Sequence为后续beam search做准备。SequenceGroup会最终保存到Scheduler中，以进行后续的调度。
-
-
     def add_request(
             self,
             request_id: str,
